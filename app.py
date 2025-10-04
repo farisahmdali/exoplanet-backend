@@ -192,24 +192,7 @@ def get_models():
             'specialty': 'General exoplanet detection',
             'loaded': 'default' in loaded_models
         },
-        {
-            'id': 'tess-optimized',
-            'name': 'TESS Optimized Model',
-            'description': 'Specialized for TESS mission data',
-            'accuracy': '94.5%',
-            'size': '38.7 MB',
-            'specialty': 'TESS data analysis',
-            'loaded': False
-        },
-        {
-            'id': 'habitable-zone',
-            'name': 'Habitable Zone Detector',
-            'description': 'Focuses on potentially habitable planets',
-            'accuracy': '92.1%',
-            'size': '52.3 MB',
-            'specialty': 'Habitable zone candidates',
-            'loaded': False
-        }
+        
     ]
     return jsonify({'models': models})
 

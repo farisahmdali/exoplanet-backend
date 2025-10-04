@@ -394,68 +394,244 @@ def train_model():
         # Check if training file is present
         if 'training_file' not in request.files:
             return jsonify({'error': 'No training file provided'}), 400
-        
+
         training_file = request.files['training_file']
-        validation_file = request.files.get('validation_file', None)
-        
+        model_name = request.form.get('model_name', f'model_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+
         # Get hyperparameters
-        hyperparameters = {
-            'learning_rate': float(request.form.get('learning_rate', 0.001)),
-            'batch_size': int(request.form.get('batch_size', 32)),
-            'epochs': int(request.form.get('epochs', 100)),
-            'hidden_layers': int(request.form.get('hidden_layers', 3)),
-            'neurons_per_layer': int(request.form.get('neurons_per_layer', 128)),
-            'dropout': float(request.form.get('dropout', 0.2)),
-            'optimizer': request.form.get('optimizer', 'adam'),
-            'activation': request.form.get('activation', 'relu')
-        }
-        
+        model_type = request.form.get('model_type', 'random_forest')
+        test_size = float(request.form.get('test_size', 0.2))
+        random_state = int(request.form.get('random_state', 42))
+
+        # Random Forest params
+        n_estimators = int(request.form.get('n_estimators', 200))
+        max_depth = int(request.form.get('max_depth', 50))
+        min_samples_split = int(request.form.get('min_samples_split', 2))
+        criterion = request.form.get('criterion', 'gini')
+        class_weight = request.form.get('class_weight', 'balanced')
+        if class_weight == 'None':
+            class_weight = None
+
+        # LightGBM params
+        learning_rate = float(request.form.get('learning_rate', 0.1))
+        num_leaves = int(request.form.get('num_leaves', 31))
+
         # Save training file
         training_filename = secure_filename(training_file.filename)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         training_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"train_{timestamp}_{training_filename}")
         training_file.save(training_filepath)
-        
+
         # Load training data
         try:
-            train_df = pd.read_csv(training_filepath)
-            logger.info(f"Loaded training data with shape: {train_df.shape}")
+            df = pd.read_csv(training_filepath)
+            logger.info(f"Loaded training data with shape: {df.shape}")
         except Exception as e:
+            os.remove(training_filepath)
             return jsonify({'error': f'Error reading training CSV: {str(e)}'}), 400
-        
-        # Simulate training process (in production, implement actual training)
-        # This would involve:
-        # 1. Data preprocessing
-        # 2. Model creation with hyperparameters
-        # 3. Training loop
-        # 4. Validation
-        # 5. Model saving
-        
-        import time
-        time.sleep(2)  # Simulate training time
-        
-        # Generate mock training results
-        results = {
-            'success': True,
-            'accuracy': 96.8,
-            'loss': 0.032,
-            'valAccuracy': 94.2,
-            'valLoss': 0.045,
-            'trainingTime': '2h 34m',
-            'bestEpoch': 87,
-            'modelSize': '45.2 MB',
-            'hyperparameters': hyperparameters,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        # Clean up uploaded files
-        os.remove(training_filepath)
-        
-        return jsonify(results)
-        
+
+        # Only keep the specified columns
+        allowed_columns = [
+            'koi_fpflag_ss',
+            'koi_fpflag_ec',
+            'koi_period',
+            'koi_time0bk',
+            'koi_impact',
+            'koi_duration',
+            'koi_depth',
+            'koi_prad',
+            'koi_teq',
+            'koi_insol',
+            'koi_model_snr',
+            'koi_tce_plnt_num',
+            'koi_steff',
+            'koi_slogg',
+            'koi_srad',
+            'ra',
+            'dec',
+            'koi_kepmag',
+            'koi_disposition'
+        ]
+        missing_cols = [col for col in allowed_columns if col not in df.columns]
+        if missing_cols:
+            os.remove(training_filepath)
+            return jsonify({'error': f'Missing required columns: {", ".join(missing_cols)}'}), 400
+        df = df[allowed_columns]
+
+        # Data preprocessing (following notebook approach)
+        try:
+            # Filter out CANDIDATE rows
+            df_filtered = df[df['koi_disposition'] != 'CANDIDATE'].copy()
+
+            # Create target variable: 0 = CONFIRMED, 1 = FALSE POSITIVE
+            df_filtered['dis_flag'] = df_filtered['koi_disposition'].apply(
+                lambda x: 0 if x == "CONFIRMED" else 1
+            )
+
+            # Drop target column
+            df_filtered = df_filtered.drop(columns=['koi_disposition'], errors='ignore')
+
+            # Remove rows with null values
+            # df_filtered = df_filtered.dropna()
+
+            logger.info(f"After preprocessing: {df_filtered.shape}")
+            print(f"After preprocessing: {df_filtered.shape}")
+            if len(df_filtered) < 100:
+                os.remove(training_filepath)
+                return jsonify({'error': 'Not enough valid rows after preprocessing (need at least 100)'}), 400
+
+            # Split features and target
+            X = df_filtered.drop('dis_flag', axis=1)
+            y = df_filtered['dis_flag']
+
+            # Train-test split with stratification
+            from sklearn.model_selection import train_test_split
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=test_size, random_state=random_state, stratify=y
+            )
+
+            logger.info(f"Train shape: {X_train.shape}, Test shape: {X_test.shape}")
+
+            # Feature scaling (for Random Forest and Logistic Regression)
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.metrics import classification_report, accuracy_score
+
+            start_time = datetime.now()
+
+            if model_type == 'random_forest':
+                from sklearn.ensemble import RandomForestClassifier
+
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                X_test_scaled = scaler.transform(X_test)
+
+                model = RandomForestClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=max_depth if max_depth < 100 else None,
+                    min_samples_split=min_samples_split,
+                    criterion=criterion,
+                    class_weight=class_weight,
+                    random_state=random_state,
+                    n_jobs=-1
+                )
+                model.fit(X_train_scaled, y_train)
+
+                y_train_pred = model.predict(X_train_scaled)
+                y_test_pred = model.predict(X_test_scaled)
+
+            elif model_type == 'lightgbm':
+                if not LIGHTGBM_AVAILABLE:
+                    os.remove(training_filepath)
+                    return jsonify({'error': 'LightGBM not installed. Please install it: pip install lightgbm'}), 400
+
+                import lightgbm as lgb
+
+                model = lgb.LGBMClassifier(
+                    learning_rate=learning_rate,
+                    num_leaves=num_leaves,
+                    random_state=random_state,
+                    n_jobs=-1
+                )
+                model.fit(X_train, y_train)
+
+                y_train_pred = model.predict(X_train)
+                y_test_pred = model.predict(X_test)
+
+            elif model_type == 'logistic_regression':
+                from sklearn.linear_model import LogisticRegression
+
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                X_test_scaled = scaler.transform(X_test)
+
+                model = LogisticRegression(
+                    random_state=random_state,
+                    max_iter=1000,
+                    n_jobs=-1
+                )
+                model.fit(X_train_scaled, y_train)
+
+                y_train_pred = model.predict(X_train_scaled)
+                y_test_pred = model.predict(X_test_scaled)
+
+            else:
+                os.remove(training_filepath)
+                return jsonify({'error': f'Unknown model type: {model_type}'}), 400
+
+            end_time = datetime.now()
+            training_time = (end_time - start_time).total_seconds()
+
+            # Calculate metrics
+            train_accuracy = accuracy_score(y_train, y_train_pred) * 100
+            test_accuracy = accuracy_score(y_test, y_test_pred) * 100
+
+            report = classification_report(y_test, y_test_pred, output_dict=True)
+
+            # Save model
+            model_filename = f"{model_name}_{timestamp}.joblib"
+            model_path = os.path.join(MODEL_FOLDER, model_filename)
+            joblib.dump(model, model_path)
+
+            logger.info(f"Model saved: {model_filename}")
+
+            # Generate results
+            results = {
+                'success': True,
+                'model_type': model_type,
+                'model_name': model_name,
+                'model_filename': model_filename,
+                'train_accuracy': round(train_accuracy, 2),
+                'test_accuracy': round(test_accuracy, 2),
+                'precision': round(report['weighted avg']['precision'] * 100, 2),
+                'recall': round(report['weighted avg']['recall'] * 100, 2),
+                'f1_score': round(report['weighted avg']['f1-score'] * 100, 2),
+                'train_samples': len(X_train),
+                'test_samples': len(X_test),
+                'training_time': f"{training_time:.2f}s",
+                'classification_report': classification_report(y_test, y_test_pred),
+                'hyperparameters': {
+                    'model_type': model_type,
+                    'test_size': test_size,
+                    'random_state': random_state,
+                    'n_estimators': n_estimators if model_type == 'random_forest' else None,
+                    'max_depth': max_depth if model_type == 'random_forest' else None,
+                    'learning_rate': learning_rate if model_type == 'lightgbm' else None,
+                },
+                'timestamp': datetime.now().isoformat()
+            }
+
+            # Clean up uploaded file
+            os.remove(training_filepath)
+
+            return jsonify(results)
+
+        except Exception as e:
+            logger.error(f"Training error: {str(e)}\n{traceback.format_exc()}")
+            os.remove(training_filepath)
+            return jsonify({'error': f'Training failed: {str(e)}'}), 500
+
     except Exception as e:
         logger.error(f"Training error: {str(e)}\n{traceback.format_exc()}")
         return jsonify({'error': f'Training failed: {str(e)}'}), 500
+
+@app.route('/api/train/download/<filename>', methods=['GET'])
+def download_model(filename):
+    """Download a trained model"""
+    try:
+        model_path = os.path.join(MODEL_FOLDER, filename)
+        if not os.path.exists(model_path):
+            return jsonify({'error': 'Model file not found'}), 404
+        
+        from flask import send_file
+        return send_file(
+            model_path,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/octet-stream'
+        )
+    except Exception as e:
+        logger.error(f"Download error: {str(e)}")
+        return jsonify({'error': f'Download failed: {str(e)}'}), 500
 
 @app.route('/api/predict/process-csv', methods=['POST'])
 def process_csv_after_null_check():

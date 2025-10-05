@@ -20,7 +20,7 @@ except ImportError:
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app, origins="*", allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])  # Allow all origins and common headers/methods
+CORS(app, origins="*")  # Allow all origins and common headers/methods
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
